@@ -1,0 +1,16 @@
+[package]
+name = "amargo"
+version = "0.2.0"
+authors = ["Roberto Vidal <vidal.roberto.j@gmail.com>"]
+edition = "2018"
+description = "An unsafe experiment"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jrvidal/amargo"
+
+[dependencies]
+syn = { version = "1.0.8", features = ["full", "visit-mut", "extra-traits"] }
+quote = "1.0.2"
+proc-macro2 = { version = "1.0.6", features = ["span-locations"] }
+tempfile = "3.1.0"
+log = "0.4.8"
+env_logger = "0.7.1"
