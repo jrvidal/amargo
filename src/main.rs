@@ -208,6 +208,8 @@ impl VisitMut for ReplacerVisitor {
             };
             *ty = quoted;
         }
+
+        syn::visit_mut::visit_type_mut(self, ty);
     }
 
     fn visit_item_fn_mut(&mut self, fun: &mut syn::ItemFn) {
