@@ -1,6 +1,8 @@
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::Command;
 
 use syn::visit_mut::VisitMut;
@@ -11,46 +13,7 @@ use syn::{Block, Expr, Type};
 /// * Slices should be translated into raw pointers?
 /// * Slice indexing does not work
 /// * Alloc interface
-fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
-
-    if std::env::var_os("AMARGO_RUSTC").is_some() {
-        main_rustc()
-    } else {
-        let exit = Command::new("cargo")
-            // We don't respect existing RUSTC_WRAPPER
-            .env("RUSTC_WRAPPER", "amargo")
-            .env("AMARGO_RUSTC", "on")
-            .args(std::env::args().skip(1))
-            .spawn()?
-            .wait()?;
-        if !exit.success() {
-            std::process::exit(exit.code().unwrap_or(1));
-        }
-        Ok(())
-    }
-}
-
-fn main_rustc() -> Result<(), Box<dyn Error>> {
-    let mut args: Vec<_> = std::env::args().skip(2).collect();
-
-    let _any = transform_args(&mut args)?;
-
-    let exit = Command::new("rustc").args(&args).spawn()?.wait()?;
-
-    if exit.success() {
-        Ok(())
-    } else {
-        Err(StringError("rustc invocation failed".into()))?
-    }
-}
-
-fn transform_args(args: &mut [String]) -> Result<impl std::any::Any, Box<dyn Error>> {
-    let (index, input_file_name) = match find_input_file(args) {
-        None => return Ok(None),
-        Some(res) => res,
-    };
-
+pub fn transform(input_file_name: &str) -> Result<impl AsRef<Path>, Box<dyn Error>> {
     let source = {
         let mut s = String::new();
         let mut file = File::open(input_file_name)?;
@@ -60,38 +23,34 @@ fn transform_args(args: &mut [String]) -> Result<impl std::any::Any, Box<dyn Err
 
     let code = transform_source(&source)?;
 
-    let mut out_file = tempfile::NamedTempFile::new()?;
+    let mut prefix = Path::new(input_file_name)
+        .file_stem()
+        .ok_or_else(|| {
+            StringError(format!(
+                "Unable to create temp file from \"{}\"",
+                input_file_name
+            ))
+        })?
+        .to_owned();
+    prefix.push(OsStr::new("-"));
+    let mut out_file = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".rs")
+        .tempfile()?;
 
-    out_file.write(format!("{}", code).as_bytes())?;
+    out_file.write_all(code.as_bytes())?;
     let new_path = out_file.into_temp_path();
 
     // Best-effort only
-    let _ = Command::new("rustfmt").arg(&new_path).spawn()?.wait()?;
-
-    args[index] = new_path.to_string_lossy().to_string();
-
-    Ok(Some(new_path))
-}
-
-fn find_input_file(args: &[String]) -> Option<(usize, &String)> {
-    let mut skip = false;
-
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "-" {
-            return None;
-        } else if arg.starts_with("-") {
-            skip = true;
-            continue;
-        } else if skip {
-            skip = false;
-            continue;
-        }
-        if arg.ends_with(".rs") {
-            return Some((i, arg));
-        }
+    if let Err(err) = Command::new("rustfmt")
+        .arg(&new_path)
+        .spawn()
+        .and_then(|mut child| child.wait())
+    {
+        log::debug!("Error formatting: {:?}", err);
     }
 
-    return None;
+    Ok(new_path)
 }
 
 #[derive(Debug)]
@@ -118,6 +77,29 @@ fn transform_source(source: &str) -> Result<String, Box<dyn Error>> {
     let code = quote::quote! {
         #![allow(unused_mut)]
         #![allow(unused_unsafe)]
+
+        mod __amargo {
+            #[allow(dead_code)]
+            pub fn alloc<T>(n: usize) -> *mut T {
+                let layout = std::alloc::Layout::from_size_align(
+                    n * std::mem::size_of::<T>(),
+                    std::mem::align_of::<T>(),
+                )
+                .expect("Error calling alloc");
+                (unsafe { std::alloc::alloc(layout) }) as *mut T
+            }
+
+            #[allow(dead_code)]
+            pub fn dealloc<T>(n: usize, ptr: *mut T) {
+                let layout = std::alloc::Layout::from_size_align(
+                    n * std::mem::size_of::<T>(),
+                    std::mem::align_of::<T>(),
+                )
+                .expect("Error calling dealloc");
+                unsafe { std::alloc::dealloc(ptr as *mut u8, layout) }
+            }
+        }
+
         #ast
     };
 
@@ -233,7 +215,7 @@ impl VisitMut for ReplacerVisitor {
     }
 
     fn visit_trait_item_method_mut(&mut self, method: &mut syn::TraitItemMethod) {
-        let default: Option<Block> = method.default.as_mut().map(|inner| {
+        let default: Option<Block> = method.default.as_ref().map(|inner| {
             syn::parse_quote! {
                 { unsafe #inner }
             }
@@ -241,6 +223,25 @@ impl VisitMut for ReplacerVisitor {
         method.default = default;
 
         syn::visit_mut::visit_trait_item_method_mut(self, method);
+    }
+
+    fn visit_expr_call_mut(&mut self, expr: &mut syn::ExprCall) {
+        match &mut *expr.func {
+            syn::Expr::Path(path_expr) => {
+                if let Some(ident) = path_expr.path.get_ident() {
+                    if ident == "alloc" {
+                        path_expr.path = syn::parse_quote! {
+                            __amargo::alloc
+                        };
+                    } else if ident == "dealloc" {
+                        path_expr.path = syn::parse_quote! {
+                            __amargo::dealloc
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
