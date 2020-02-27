@@ -6,6 +6,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let is_wrapper = std::env::var("RUUGTS_WRAPPER").is_ok();
+    let amargo_feature = std::env::var("AMARGO_FEATURE")
+        .ok()
+        .unwrap_or_else(|| "amargo".into());
 
     let mut raw_args: Vec<_> = std::env::args()
         .skip(if is_wrapper { 2 } else { 1 })
@@ -25,8 +28,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap()
         .0;
 
-    let path = amargo::transform(file)?;
-    raw_args[index] = path.as_ref().to_str().unwrap().to_string();
+    let _new_source_file = match amargo::transform(file) {
+        Ok(new_source_file) => {
+            raw_args[index] = new_source_file.as_ref().to_str().unwrap().to_string();
+            Some(new_source_file)
+        }
+        Err(err) => {
+            // Let the compiler go through if syn cannot parse
+            let parsing_error = err.downcast::<syn::Error>()?;
+            log::error!(
+                "Parsing error: {:?} {:?} {:?}",
+                parsing_error,
+                parsing_error.span().start(),
+                parsing_error.span().end()
+            );
+            None
+        }
+    };
+
+    raw_args.push("--cfg".into());
+    raw_args.push(format!("feature=\"{}\"", amargo_feature));
 
     log::trace!("{:?}", raw_args);
     let exit = Command::new("rustc").args(&raw_args).spawn()?.wait()?;
@@ -53,6 +74,11 @@ fn app(is_wrapper: bool) -> App<'static, 'static> {
         .arg(
             Arg::with_name("crate-name")
                 .long("crate-name")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("crate-type")
+                .long("crate-type")
                 .takes_value(true),
         )
         .arg(
@@ -100,5 +126,5 @@ fn app(is_wrapper: bool) -> App<'static, 'static> {
         )
         .arg(Arg::with_name("O").short("O"))
         .arg(Arg::with_name("test").long("test"))
-        .arg(Arg::with_name("color").long("color"))
+        .arg(Arg::with_name("color").long("color").takes_value(true))
 }

@@ -8,6 +8,8 @@ use std::process::Command;
 use syn::visit_mut::VisitMut;
 use syn::{Block, Expr, Type};
 
+mod alloc;
+
 /// TODO
 /// * string literals
 /// * Slices should be translated into raw pointers?
@@ -21,6 +23,7 @@ pub fn transform(input_file_name: &str) -> Result<impl AsRef<Path>, Box<dyn Erro
         s
     };
 
+    log::trace!("original source:\n{}", source);
     let code = transform_source(&source)?;
 
     let mut prefix = Path::new(input_file_name)
@@ -50,6 +53,13 @@ pub fn transform(input_file_name: &str) -> Result<impl AsRef<Path>, Box<dyn Erro
         log::debug!("Error formatting: {:?}", err);
     }
 
+    if log::log_enabled!(log::Level::Trace) {
+        log::trace!(
+            "formatted output:\n{}",
+            std::fs::read_to_string(&new_path).unwrap()
+        );
+    }
+
     Ok(new_path)
 }
 
@@ -67,126 +77,160 @@ impl Error for StringError {}
 fn transform_source(source: &str) -> Result<String, Box<dyn Error>> {
     let mut ast = syn::parse_file(&source)?;
 
-    let mut marker = MarkerVisitor;
-    marker.visit_file_mut(&mut ast);
-    log::debug!("{}", quote::quote! {#ast});
-
+    log::trace!("{:?}", ast);
     let mut replacer = ReplacerVisitor;
     replacer.visit_file_mut(&mut ast);
+
+    let std_ast = syn::parse_file(include_str!("../unsafe_std.rs"))?;
 
     let code = quote::quote! {
         #![allow(unused_mut)]
         #![allow(unused_unsafe)]
 
-        mod __amargo {
-            #[allow(dead_code)]
-            pub fn alloc<T>(n: usize) -> *mut T {
-                let layout = std::alloc::Layout::from_size_align(
-                    n * std::mem::size_of::<T>(),
-                    std::mem::align_of::<T>(),
-                )
-                .expect("Error calling alloc");
-                (unsafe { std::alloc::alloc(layout) }) as *mut T
-            }
-
-            #[allow(dead_code)]
-            pub fn dealloc<T>(n: usize, ptr: *mut T) {
-                let layout = std::alloc::Layout::from_size_align(
-                    n * std::mem::size_of::<T>(),
-                    std::mem::align_of::<T>(),
-                )
-                .expect("Error calling dealloc");
-                unsafe { std::alloc::dealloc(ptr as *mut u8, layout) }
-            }
-        }
-
         #ast
+
+        #std_ast
     };
 
-    log::debug!("{}", code);
+    log::debug!("after replacer: {}", code);
 
     Ok(format!("{}", code))
 }
 
-struct MarkerVisitor;
+struct ReplacerVisitor;
 
-impl VisitMut for MarkerVisitor {
-    fn visit_expr_mut(&mut self, expr: &mut Expr) {
-        match expr {
-            Expr::Reference(reference) => {
-                let inner = &reference.expr;
-                let quoted: Expr = syn::parse_quote! {
-                    __make_unsafe![#inner]
-                };
-                *expr = quoted;
-            }
-            Expr::Unary(syn::ExprUnary {
-                op: syn::UnOp::Deref(..),
-                expr: inner,
-                ..
-            }) => {
-                let quoted: Expr = syn::parse_quote! {
-                    __make_unsafe_deref![#inner]
-                };
-                *expr = quoted;
-            }
-            Expr::Assign(syn::ExprAssign { left, right, .. }) => {
-                if let Expr::Unary(syn::ExprUnary {
-                    op: syn::UnOp::Deref(..),
-                    expr: ref inner,
-                    ..
-                }) = **left
-                {
-                    let quoted: Expr = syn::parse_quote! {
-                        __make_unsafe_assign_deref![{#inner} {#right}]
-                    };
-                    *expr = quoted;
+impl ReplacerVisitor {
+    fn cast_reference(&self, ref_expr: &syn::ExprReference) -> Expr {
+        log::trace!("cast_reference");
+        let inner = &ref_expr.expr;
+
+        let mutability = ref_expr.mutability;
+        let pointer_type: syn::Type = match mutability {
+            Some(_) => syn::parse_quote![*mut _],
+            None => syn::parse_quote![*const _],
+        };
+        let wrapper: syn::Ident = if mutability.is_some() {
+            syn::parse_quote![__amargo_ref_mut]
+        } else {
+            syn::parse_quote![__amargo_ref]
+        };
+
+        syn::parse_quote![
+            #wrapper(#inner) as #pointer_type
+        ]
+    }
+
+    fn fn_ident<'ex, 'ident>(
+        call_expr: &'ex syn::ExprCall,
+        ident: &'ident str,
+    ) -> Option<&'ex Expr> {
+        match &*call_expr.func {
+            Expr::Path(path_expr) => {
+                if path_expr.path.is_ident(ident) {
+                    Some(
+                        call_expr
+                            .args
+                            .first()
+                            .expect("Unexpected empty field deref"),
+                    )
+                } else {
+                    None
                 }
             }
-            _ => {}
+            _ => None,
+        }
+    }
+
+    fn derive_attr(attributes: &mut [syn::Attribute]) -> Option<&mut syn::Attribute> {
+        attributes
+            .iter_mut()
+            .find(|attr| attr.path.is_ident("derive"))
+    }
+
+    fn make_copy(attributes: &mut Vec<syn::Attribute>) {
+        let derive_attr = match ReplacerVisitor::derive_attr(attributes.as_mut_slice()) {
+            Some(attr) => attr,
+            _ => {
+                attributes.push(syn::parse_quote![#[derive(Clone, Copy)]]);
+                return;
+            }
+        };
+
+        let mut meta_list = match derive_attr.parse_meta() {
+            Ok(syn::Meta::List(meta_list)) => meta_list,
+            _ => return,
+        };
+
+        let mut has_clone = false;
+        let mut has_copy = false;
+
+        for nested in meta_list.nested.iter() {
+            match nested {
+                syn::NestedMeta::Meta(syn::Meta::Path(meta_path)) => {
+                    if meta_path.is_ident("Clone") {
+                        has_clone = true;
+                    } else if meta_path.is_ident("Copy") {
+                        has_copy = true;
+                    }
+                }
+                _ => {}
+            }
         }
 
-        syn::visit_mut::visit_expr_mut(self, expr);
+        if !has_clone {
+            let meta: syn::Meta = syn::parse_quote![Clone];
+            meta_list.nested.push(syn::NestedMeta::Meta(meta));
+        }
+
+        if !has_copy {
+            let meta: syn::Meta = syn::parse_quote![Copy];
+            meta_list.nested.push(syn::NestedMeta::Meta(meta));
+        }
+
+        *derive_attr = syn::parse_quote![ #[ #meta_list ] ];
     }
 }
 
-struct ReplacerVisitor;
-
 impl VisitMut for ReplacerVisitor {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
-        if let Expr::Macro(exprmacro) = expr {
-            if exprmacro.mac.path.is_ident("__make_unsafe") {
-                let inner_expr: Expr =
-                    syn::parse2(exprmacro.mac.tokens.clone()).expect("Unexpected parsing error");
-                let new_expr: Expr = syn::parse_quote! {
-                    &#inner_expr as *const _ as *mut _
-                };
-                *expr = new_expr;
-            } else if exprmacro.mac.path.is_ident("__make_unsafe_deref") {
-                let inner_expr: Expr =
-                    syn::parse2(exprmacro.mac.tokens.clone()).expect("Unexpected parsing error");
-                let new_expr: Expr = syn::parse_quote! {
-                    unsafe { *#inner_expr }
-                };
-                *expr = new_expr;
-            } else if exprmacro.mac.path.is_ident("__make_unsafe_assign_deref") {
-                let mut tokens = exprmacro.mac.tokens.clone().into_iter();
-                let left = expr_from_tree(tokens.next().expect("Unexpected empty tokens"));
-                let right = expr_from_tree(tokens.next().expect("Unexpected empty tokens"));
-                let new_expr: Expr = syn::parse_quote! {
-                    unsafe { *#left = #right }
-                };
-                *expr = new_expr;
+        match expr {
+            Expr::Reference(reference) => {
+                let casted = self.cast_reference(reference);
+                *expr = casted;
             }
-        }
+            Expr::Call(call) => {
+                let mut new = None;
+
+                if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref") {
+                    // let decomposed = self.decompose(field_ref);
+                    new = Some(syn::parse_quote![&#reference]);
+                }
+
+                if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref_mut") {
+                    // let decomposed = self.decompose(field_ref);
+                    new = Some(syn::parse_quote![&mut #reference]);
+                }
+
+                if let Some(new) = new {
+                    *expr = new;
+                }
+            }
+            _ => {}
+        };
         syn::visit_mut::visit_expr_mut(self, expr);
     }
 
     fn visit_type_mut(&mut self, ty: &mut Type) {
-        if let Type::Reference(reference) = ty {
-            let inner = reference.elem.clone();
-            let quoted: Type = syn::parse_quote! {
-                *mut #inner
+        if let Type::Reference(reference_ty) = ty {
+            let inner = reference_ty.elem.clone();
+            let quoted: Type = if reference_ty.mutability.is_some() {
+                syn::parse_quote! [
+                    *mut #inner
+                ]
+            } else {
+                syn::parse_quote! [
+                    *const #inner
+                ]
             };
             *ty = quoted;
         }
@@ -196,9 +240,9 @@ impl VisitMut for ReplacerVisitor {
 
     fn visit_item_fn_mut(&mut self, fun: &mut syn::ItemFn) {
         let inner = &fun.block;
-        let block: Block = syn::parse_quote! {
+        let block: Block = syn::parse_quote! [
             { unsafe #inner }
-        };
+        ];
         *fun.block = block;
 
         syn::visit_mut::visit_item_fn_mut(self, fun);
@@ -206,9 +250,9 @@ impl VisitMut for ReplacerVisitor {
 
     fn visit_impl_item_method_mut(&mut self, method: &mut syn::ImplItemMethod) {
         let inner = &method.block;
-        let block: Block = syn::parse_quote! {
+        let block: Block = syn::parse_quote! [
             { unsafe #inner }
-        };
+        ];
         method.block = block;
 
         syn::visit_mut::visit_impl_item_method_mut(self, method);
@@ -216,38 +260,17 @@ impl VisitMut for ReplacerVisitor {
 
     fn visit_trait_item_method_mut(&mut self, method: &mut syn::TraitItemMethod) {
         let default: Option<Block> = method.default.as_ref().map(|inner| {
-            syn::parse_quote! {
+            syn::parse_quote! [
                 { unsafe #inner }
-            }
+            ]
         });
         method.default = default;
 
         syn::visit_mut::visit_trait_item_method_mut(self, method);
     }
 
-    fn visit_expr_call_mut(&mut self, expr: &mut syn::ExprCall) {
-        match &mut *expr.func {
-            syn::Expr::Path(path_expr) => {
-                if let Some(ident) = path_expr.path.get_ident() {
-                    if ident == "alloc" {
-                        path_expr.path = syn::parse_quote! {
-                            __amargo::alloc
-                        };
-                    } else if ident == "dealloc" {
-                        path_expr.path = syn::parse_quote! {
-                            __amargo::dealloc
-                        };
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn expr_from_tree(tree: proc_macro2::TokenTree) -> proc_macro2::TokenStream {
-    match tree {
-        proc_macro2::TokenTree::Group(group) => group.stream(),
-        _ => unreachable!(),
+    fn visit_item_struct_mut(&mut self, struct_item: &mut syn::ItemStruct) {
+        ReplacerVisitor::make_copy(&mut struct_item.attrs);
+        syn::visit_mut::visit_item_struct_mut(self, struct_item);
     }
 }
