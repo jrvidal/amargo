@@ -8,7 +8,10 @@ use std::process::Command;
 use syn::visit_mut::VisitMut;
 use syn::{Block, Expr, Type};
 
-mod alloc;
+pub struct Mode {
+    std: bool,
+    refs: bool
+}
 
 /// TODO
 /// * string literals
@@ -81,7 +84,8 @@ fn transform_source(source: &str) -> Result<String, Box<dyn Error>> {
     let mut replacer = ReplacerVisitor;
     replacer.visit_file_mut(&mut ast);
 
-    let std_ast = syn::parse_file(include_str!("../unsafe_std.rs"))?;
+    let std_ast = syn::parse_file(include_str!("../unsafe_std.rs"))
+        .expect("unsafe_std is not valid");
 
     let code = quote::quote! {
         #![allow(unused_mut)]
@@ -105,18 +109,26 @@ impl ReplacerVisitor {
         let inner = &ref_expr.expr;
 
         let mutability = ref_expr.mutability;
-        let pointer_type: syn::Type = match mutability {
-            Some(_) => syn::parse_quote![*mut _],
-            None => syn::parse_quote![*const _],
+        let method: syn::Ident = match mutability {
+            Some(_) => syn::parse_quote![__amargo_deref_mut],
+            None => syn::parse_quote![__amargo_deref]
         };
-        let wrapper: syn::Ident = if mutability.is_some() {
-            syn::parse_quote![__amargo_ref_mut]
-        } else {
-            syn::parse_quote![__amargo_ref]
-        };
+        // let pointer_type: syn::Type = match mutability {
+        //     Some(_) => syn::parse_quote![*mut _],
+        //     None => syn::parse_quote![*const _],
+        // };
+        // let wrapper: syn::Ident = if mutability.is_some() {
+        //     syn::parse_quote![__amargo_ref_mut]
+        // } else {
+        //     syn::parse_quote![__amargo_ref]
+        // };
+
+        // syn::parse_quote![
+        //     #wrapper(#inner) as #pointer_type
+        // ]
 
         syn::parse_quote![
-            #wrapper(#inner) as #pointer_type
+            #inner.#method()
         ]
     }
 
@@ -199,21 +211,31 @@ impl VisitMut for ReplacerVisitor {
                 *expr = casted;
             }
             Expr::Call(call) => {
-                let mut new = None;
-
-                if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref") {
-                    // let decomposed = self.decompose(field_ref);
-                    new = Some(syn::parse_quote![&#reference]);
+                match &mut *call.func {
+                    Expr::Path(ref mut path_expr) => {
+                        if path_expr.path.is_ident("drop") {
+                            let arg = call.args.first_mut().expect("Unexpected empty drop");
+                            syn::visit_mut::visit_expr_mut(self, arg);
+                            *call = syn::parse_quote![
+                                __amargo_drop(&#arg)
+                            ];
+                            return;
+                        }
+                    }
+                    _ => {},
                 }
 
-                if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref_mut") {
-                    // let decomposed = self.decompose(field_ref);
-                    new = Some(syn::parse_quote![&mut #reference]);
-                }
 
-                if let Some(new) = new {
-                    *expr = new;
-                }
+                // if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref") {
+                //     // let decomposed = self.decompose(field_ref);
+                //     new = Some(syn::parse_quote![&#reference]);
+                // }
+
+                // if let Some(reference) = ReplacerVisitor::fn_ident(call, "__amargo_ref_mut") {
+                //     // let decomposed = self.decompose(field_ref);
+                //     new = Some(syn::parse_quote![&mut #reference]);
+                // }
+
             }
             _ => {}
         };
@@ -222,17 +244,17 @@ impl VisitMut for ReplacerVisitor {
 
     fn visit_type_mut(&mut self, ty: &mut Type) {
         if let Type::Reference(reference_ty) = ty {
-            let inner = reference_ty.elem.clone();
-            let quoted: Type = if reference_ty.mutability.is_some() {
-                syn::parse_quote! [
-                    *mut #inner
-                ]
-            } else {
-                syn::parse_quote! [
-                    *const #inner
-                ]
-            };
-            *ty = quoted;
+            // let inner = reference_ty.elem.clone();
+            // let quoted: Type = if reference_ty.mutability.is_some() {
+            //     syn::parse_quote! [
+            //         *mut #inner
+            //     ]
+            // } else {
+            //     syn::parse_quote! [
+            //         *const #inner
+            //     ]
+            // };
+            // *ty = quoted;
         }
 
         syn::visit_mut::visit_type_mut(self, ty);

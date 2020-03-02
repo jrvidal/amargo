@@ -1,11 +1,53 @@
+#[allow(unused_imports)]
 use self::__amargo_std::AmargoBox as Box;
+#[allow(unused_imports)]
 use self::__amargo_std::AmargoVec as Vec;
+#[allow(unused_imports)]
+use self::__amargo_std::__AmargoDeref;
+#[allow(unused_imports)]
+use self::__amargo_std::__amargo_drop;
 
 mod __amargo_std {
     use std::mem::ManuallyDrop;
     use std::ops::{Deref, DerefMut, Index, IndexMut};
     use std::slice::SliceIndex;
-    use std::fmt::{self, Display, Debug, Formatter};
+    use std::fmt::{self, Debug, Formatter};
+
+    pub trait AmargoDrop: Sized {
+        fn drop(self) {}
+    }
+
+    pub fn __amargo_drop<T: AmargoDrop>(val: T) {
+        <T as AmargoDrop>::drop(val);
+    }
+
+    impl<T> AmargoDrop for &T {}
+
+    impl<T> AmargoDrop for AmargoBox<T> {
+        fn drop(self) {
+            AmargoBox::destroy(self)
+        }
+    }
+
+    impl<T> AmargoDrop for AmargoVec<T> {
+        fn drop(self) {
+            AmargoVec::destroy(self)
+        }
+    }
+
+    pub trait __AmargoDeref {
+        fn __amargo_deref<'a, 'b>(&'a self) -> &'b Self;
+        fn __amargo_deref_mut<'a, 'b>(&'a self) -> &'b mut Self;
+    }
+
+    impl<T> __AmargoDeref for T {
+        fn __amargo_deref<'a, 'b>(&'a self) -> &'b T {
+            unsafe { &*(self as *const _) }
+        }
+        fn __amargo_deref_mut<'a, 'b>(&'a self) -> &'b mut T {
+            unsafe { &mut *(self as *const _ as *mut _) }
+        }
+    }
 
     #[derive(Clone, Copy)]
     pub struct AmargoBox<T>(*mut T);
@@ -17,7 +59,7 @@ mod __amargo_std {
         }
 
         #[allow(dead_code)]
-        pub fn destroy(other: AmargoBox<T>) {
+        fn destroy(other: AmargoBox<T>) {
             drop(unsafe { Box::from_raw(other.0) })
         }
     }
@@ -93,7 +135,7 @@ mod __amargo_std {
         }
 
         #[allow(dead_code)]
-        pub fn destroy(other: AmargoVec<T>) {
+        fn destroy(other: AmargoVec<T>) {
             unsafe { ManuallyDrop::drop(&mut other.get_vec()) }
         }
     }
@@ -122,17 +164,6 @@ mod __amargo_std {
         }
     }
 
-
-    // #[allow(dead_code)]
-    // fn dealloc<T>(n: usize, ptr: *mut u8) {
-    //     let layout = std::alloc::Layout::from_size_align(
-    //         n * std::mem::size_of::<T>(),
-    //         std::mem::align_of::<T>(),
-    //     )
-    //     .expect("Error calling dealloc");
-    //     unsafe { std::alloc::dealloc(ptr as *mut u8, layout) }
-    // }
-
     impl<T> Deref for AmargoVec<T> {
         type Target = [T];
 
@@ -146,113 +177,4 @@ mod __amargo_std {
             unsafe { &mut *(&mut **self.get_vec() as *mut [T]) }
         }
     }
-
-    // trait __AmargoAllocation: Sized {
-    //     type Base;
-    //     fn __cast_from(ptr: *mut u8) -> Self;
-    //     fn __cast_to(self) -> *mut u8;
-    //     fn dealloc(n: usize, ptr: Self) {
-    //         dealloc::<Self>(n, ptr.__cast_to());
-    //     }
-    // }
-
-    // impl<T> __AmargoAllocation for *const T {
-    //     type Base = T;
-    //     fn __cast_from(ptr: *mut u8) -> *const T {
-    //         ptr as *const u8 as *const T
-    //     }
-
-    //     fn __cast_to(self) -> *mut u8 {
-    //         self as *const u8 as *mut u8
-    //     }
-    // }
-
-    // impl<T> __AmargoAllocation for *mut T {
-    //     type Base = T;
-    //     fn __cast_from(ptr: *mut u8) -> *mut T {
-    //         ptr as *mut T
-    //     }
-
-    //     fn __cast_to(self) -> *mut u8 {
-    //         self as *mut u8
-    //     }
-    // }
-
-    // #[allow(dead_code)]
-    // fn __amargo_inner_alloc<T>(n: usize) -> *mut u8 {
-    //     let layout = std::alloc::Layout::from_size_align(
-    //         n * std::mem::size_of::<T>(),
-    //         std::mem::align_of::<T>(),
-    //     )
-    //     .expect("Error calling alloc");
-    //     unsafe { std::alloc::alloc(layout) }
-    // }
-
-    // #[allow(dead_code)]
-    // fn __amargo_inner_dealloc<T>(n: usize, ptr: *mut u8) {
-    //     let layout = std::alloc::Layout::from_size_align(
-    //         n * std::mem::size_of::<T>(),
-    //         std::mem::align_of::<T>(),
-    //     )
-    //     .expect("Error calling dealloc");
-    //     unsafe { std::alloc::dealloc(ptr as *mut u8, layout) }
-    // }
-
-    // trait __AmargoAllocation: Sized {
-    //     type Base;
-    //     fn cast_from(ptr: *mut u8) -> Self;
-    //     fn cast_to(self) -> *mut u8;
-    //     fn alloc(n: usize) -> Self {
-    //         <Self as __AmargoAllocation>::cast_from(__amargo_inner_alloc::<Self>(n))
-    //     }
-    //     fn dealloc(n: usize, ptr: Self) {
-    //         __amargo_inner_dealloc::<Self>(n, ptr.cast_to());
-    //     }
-    // }
-
-    // impl<T> __AmargoAllocation for *const T {
-    //     type Base = T;
-    //     fn cast_from(ptr: *mut u8) -> *const T {
-    //         ptr as *const u8 as *const T
-    //     }
-
-    //     fn cast_to(self) -> *mut u8 {
-    //         self as *const u8 as *mut u8
-    //     }
-    // }
-
-    // impl<T> __AmargoAllocation for *mut T {
-    //     type Base = T;
-    //     fn cast_from(ptr: *mut u8) -> *mut T {
-    //         ptr as *mut T
-    //     }
-
-    //     fn cast_to(self) -> *mut u8 {
-    //         self as *mut u8
-    //     }
-    // }
-
-    // trait __AmargoAllocatable: Sized {
-    //     fn new_box<T: __AmargoAllocation<Base = Self>>() -> T;
-    // }
-
-    // #[allow(dead_code)]
-    // fn box_new<T: __AmargoAllocation>() -> T {
-    //     T::alloc(1)
-    // }
-
-    // #[allow(dead_code)]
-    // fn box_drop<T: __AmargoAllocation>(ptr: T) {
-    //     T::dealloc(1, ptr)
-    // }
-
-    // #[allow(dead_code)]
-    // fn list_new<T: __AmargoAllocation>(n: usize) -> T {
-    //     T::alloc(n)
-    // }
-
-    // #[allow(dead_code)]
-    // fn list_drop<T: __AmargoAllocation>(n: usize, ptr: T) {
-    //     T::dealloc(n, ptr)
-    // }
 }
