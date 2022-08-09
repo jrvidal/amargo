@@ -87,9 +87,14 @@ fn transform_source(source: &str) -> Result<String, Box<dyn Error>> {
     let std_ast = syn::parse_file(include_str!("../unsafe_std.rs"))
         .expect("unsafe_std is not valid");
 
+    let prelude_ast = syn::parse_file(include_str!("../unsafe_prelude.rs"))
+        .expect("unsafe_prelude is not valid");
+
     let code = quote::quote! {
         #![allow(unused_mut)]
         #![allow(unused_unsafe)]
+
+        #prelude_ast
 
         #ast
 
@@ -110,8 +115,8 @@ impl ReplacerVisitor {
 
         let mutability = ref_expr.mutability;
         let method: syn::Ident = match mutability {
-            Some(_) => syn::parse_quote![__amargo_deref_mut],
-            None => syn::parse_quote![__amargo_deref]
+            Some(_) => syn::parse_quote![__amargo_ref_mut],
+            None => syn::parse_quote![__amargo_ref]
         };
         // let pointer_type: syn::Type = match mutability {
         //     Some(_) => syn::parse_quote![*mut _],
@@ -128,7 +133,7 @@ impl ReplacerVisitor {
         // ]
 
         syn::parse_quote![
-            #inner.#method()
+            (#inner).#method()
         ]
     }
 
@@ -260,36 +265,36 @@ impl VisitMut for ReplacerVisitor {
         syn::visit_mut::visit_type_mut(self, ty);
     }
 
-    fn visit_item_fn_mut(&mut self, fun: &mut syn::ItemFn) {
-        let inner = &fun.block;
-        let block: Block = syn::parse_quote! [
-            { unsafe #inner }
-        ];
-        *fun.block = block;
+    // fn visit_item_fn_mut(&mut self, fun: &mut syn::ItemFn) {
+    //     let inner = &fun.block;
+    //     let block: Block = syn::parse_quote! [
+    //         { unsafe #inner }
+    //     ];
+    //     *fun.block = block;
 
-        syn::visit_mut::visit_item_fn_mut(self, fun);
-    }
+    //     syn::visit_mut::visit_item_fn_mut(self, fun);
+    // }
 
-    fn visit_impl_item_method_mut(&mut self, method: &mut syn::ImplItemMethod) {
-        let inner = &method.block;
-        let block: Block = syn::parse_quote! [
-            { unsafe #inner }
-        ];
-        method.block = block;
+    // fn visit_impl_item_method_mut(&mut self, method: &mut syn::ImplItemMethod) {
+    //     let inner = &method.block;
+    //     let block: Block = syn::parse_quote! [
+    //         { unsafe #inner }
+    //     ];
+    //     method.block = block;
 
-        syn::visit_mut::visit_impl_item_method_mut(self, method);
-    }
+    //     syn::visit_mut::visit_impl_item_method_mut(self, method);
+    // }
 
-    fn visit_trait_item_method_mut(&mut self, method: &mut syn::TraitItemMethod) {
-        let default: Option<Block> = method.default.as_ref().map(|inner| {
-            syn::parse_quote! [
-                { unsafe #inner }
-            ]
-        });
-        method.default = default;
+    // fn visit_trait_item_method_mut(&mut self, method: &mut syn::TraitItemMethod) {
+    //     let default: Option<Block> = method.default.as_ref().map(|inner| {
+    //         syn::parse_quote! [
+    //             { unsafe #inner }
+    //         ]
+    //     });
+    //     method.default = default;
 
-        syn::visit_mut::visit_trait_item_method_mut(self, method);
-    }
+    //     syn::visit_mut::visit_trait_item_method_mut(self, method);
+    // }
 
     fn visit_item_struct_mut(&mut self, struct_item: &mut syn::ItemStruct) {
         ReplacerVisitor::make_copy(&mut struct_item.attrs);

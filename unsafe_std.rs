@@ -3,54 +3,61 @@ use self::__amargo_std::AmargoBox as Box;
 #[allow(unused_imports)]
 use self::__amargo_std::AmargoVec as Vec;
 #[allow(unused_imports)]
-use self::__amargo_std::__AmargoDeref;
+use self::__amargo_std::__AmargoRef;
 #[allow(unused_imports)]
 use self::__amargo_std::__amargo_drop;
 
 mod __amargo_std {
+    use std::fmt::{self, Debug, Formatter};
     use std::mem::ManuallyDrop;
     use std::ops::{Deref, DerefMut, Index, IndexMut};
     use std::slice::SliceIndex;
-    use std::fmt::{self, Debug, Formatter};
 
     pub trait AmargoDrop: Sized {
-        fn drop(self) {}
+        fn drop(&self) {}
     }
 
-    pub fn __amargo_drop<T: AmargoDrop>(val: T) {
+    pub fn __amargo_drop<'a, T: AmargoDrop>(val: &'a T) {
         <T as AmargoDrop>::drop(val);
     }
 
     impl<T> AmargoDrop for &T {}
 
     impl<T> AmargoDrop for AmargoBox<T> {
-        fn drop(self) {
-            AmargoBox::destroy(self)
+        fn drop(&self) {
+            AmargoBox::destroy(*self)
         }
     }
 
     impl<T> AmargoDrop for AmargoVec<T> {
-        fn drop(self) {
-            AmargoVec::destroy(self)
+        fn drop(&self) {
+            AmargoVec::destroy(*self)
         }
     }
 
-    pub trait __AmargoDeref {
-        fn __amargo_deref<'a, 'b>(&'a self) -> &'b Self;
-        fn __amargo_deref_mut<'a, 'b>(&'a self) -> &'b mut Self;
+    pub trait __AmargoRef {
+        fn __amargo_ref<'a, 'b>(&'a self) -> &'b Self;
+        fn __amargo_ref_mut<'a, 'b>(&'a self) -> &'b mut Self;
     }
 
-    impl<T> __AmargoDeref for T {
-        fn __amargo_deref<'a, 'b>(&'a self) -> &'b T {
+    impl<T> __AmargoRef for T {
+        fn __amargo_ref<'a, 'b>(&'a self) -> &'b T {
             unsafe { &*(self as *const _) }
         }
-        fn __amargo_deref_mut<'a, 'b>(&'a self) -> &'b mut T {
+        fn __amargo_ref_mut<'a, 'b>(&'a self) -> &'b mut T {
             unsafe { &mut *(self as *const _ as *mut _) }
         }
     }
 
-    #[derive(Clone, Copy)]
     pub struct AmargoBox<T>(*mut T);
+
+    impl<T> Clone for AmargoBox<T> {
+        fn clone(&self) -> Self {
+            AmargoBox(self.0)
+        }
+    }
+
+    impl<T> Copy for AmargoBox<T> {}
 
     impl<T> AmargoBox<T> {
         #[allow(dead_code)]
@@ -84,17 +91,32 @@ mod __amargo_std {
         }
     }
 
-    #[derive(Clone, Copy)]
     pub struct AmargoVec<T> {
         capacity: usize,
         length: usize,
         ptr: *mut T,
     }
 
+    impl<T> Clone for AmargoVec<T> {
+        fn clone(&self) -> Self {
+            AmargoVec {
+                capacity: self.capacity,
+                length: self.length,
+                ptr: self.ptr,
+            }
+        }
+    }
+
+    impl<T> Copy for AmargoVec<T> {}
+
     impl<T> AmargoVec<T> {
         #[allow(dead_code)]
         pub fn new() -> Self {
-            let mut vec = ManuallyDrop::new(Vec::new());
+            AmargoVec::__new_from_vec(Vec::new())
+        }
+
+        pub fn __new_from_vec(vec: Vec<T>) -> Self {
+            let mut vec = ManuallyDrop::new(vec);
             AmargoVec {
                 capacity: vec.capacity(),
                 length: vec.len(),
